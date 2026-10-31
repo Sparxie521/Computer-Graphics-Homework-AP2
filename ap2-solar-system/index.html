@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AP2 · 三维层级场景：太阳系（WebGL 2.0）</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+  <aside id="panel">
+    <h1>AP2 · 三维层级场景：太阳系</h1>
+    <div class="sub">层级变换 / 双投影 / 相机漫游 · WebGL 2.0 · 教材 Common 库</div>
+
+    <!-- ============ 观察与投影 ============ -->
+    <div class="sec">
+      <div class="sec-title">观察与投影（O 键切换）</div>
+      <div class="radios" id="ctl-proj">
+        <label><input type="radio" name="proj" value="persp" checked><span>透视</span></label>
+        <label><input type="radio" name="proj" value="ortho"><span>正交</span></label>
+      </div>
+      <div class="row" style="margin-top:8px"><label>预设视角</label></div>
+      <select id="ctl-preset">
+        <option value="full">全景（默认机位）</option>
+        <option value="side">黄道面侧视（看轨道共面）</option>
+        <option value="top">黄道面俯视</option>
+        <option value="earth">地球特写（看 23.5° 倾角）</option>
+      </select>
+      <div class="row" style="margin-top:8px">
+        <label><input type="checkbox" id="ctl-roam" checked style="width:auto"> 相机漫游（空格）</label>
+      </div>
+      <div class="hint">漫游中 / 暂停中拖拽鼠标即接管视角；再按 <b>空格</b> 交还给漫游路径。</div>
+    </div>
+
+    <!-- ============ 运动参数 ============ -->
+    <div class="sec">
+      <div class="sec-title">运动（P 键暂停全部运动）</div>
+      <div class="row"><label>公转速度</label><span class="val" id="val-orbit">1.00×</span></div>
+      <input type="range" id="ctl-orbit" min="0" max="4" step="0.05" value="1">
+      <div class="row"><label>自转速度</label><span class="val" id="val-spin">1.00×</span></div>
+      <input type="range" id="ctl-spin" min="0" max="4" step="0.05" value="1">
+      <div class="hint">速度为 0 即冻结该运动，便于讲解单个变换。</div>
+    </div>
+
+    <!-- ============ 地球轴倾角 ============ -->
+    <div class="sec">
+      <div class="sec-title">地球自转轴倾角（内层变换）</div>
+      <div class="row"><label>轴倾角</label><span class="val" id="val-tilt">23.5°</span></div>
+      <input type="range" id="ctl-tilt" min="0" max="60" step="0.5" value="23.5">
+      <div class="hint">模型矩阵 <b>M = R<sub>轨道</sub> · T · R<sub>倾角</sub> · R<sub>自转</sub> · S</b>：
+        倾角在内层、轨道在外层，先转后挂。</div>
+    </div>
+
+    <!-- ============ 月球轨道面倾角（手造矩阵） ============ -->
+    <div class="sec">
+      <div class="sec-title">月球轨道面倾角（手工矩阵）</div>
+      <div class="row"><label>轨道倾角 i</label><span class="val" id="val-incl">5.15°</span></div>
+      <input type="range" id="ctl-incl" min="0" max="40" step="0.05" value="5.15">
+      <div class="hint">由三次 <b>rotate()</b> 手工 mult 成
+        <b>R = R<sub>y</sub>(Ω)·R<sub>x</sub>(i)·R<sub>y</sub>(−Ω)</b>（见 README 推导）。</div>
+    </div>
+
+    <!-- ============ 显示开关 ============ -->
+    <div class="sec">
+      <div class="sec-title">显示</div>
+      <div class="row"><label><input type="checkbox" id="ctl-orbits" checked style="width:auto"> 轨道线</label></div>
+      <div class="row"><label><input type="checkbox" id="ctl-axis" checked style="width:auto"> 地球自转轴</label></div>
+      <div class="row"><label><input type="checkbox" id="ctl-stars" checked style="width:auto"> 星空背景</label></div>
+    </div>
+
+    <div class="sec">
+      <button id="ctl-reset">重置视角与参数（R）</button>
+    </div>
+
+    <div class="sec">
+      <div class="sec-title">快捷键</div>
+      <div class="hint">
+        <b>O</b> 正交 / 透视切换<br>
+        <b>空格</b> 漫游暂停 / 继续（拖拽即接管）<br>
+        <b>P</b> 暂停 / 继续全部运动<br>
+        <b>R</b> 重置视角与参数<br>
+        <b>左键拖拽</b> 绕目标旋转视角　<b>滚轮</b> 推拉<br>
+        <b>1 / 2 / 3 / 4</b> 四个预设视角
+      </div>
+    </div>
+  </aside>
+
+  <main id="viewport">
+    <canvas id="glcanvas" tabindex="0"></canvas>
+    <div id="status">初始化…</div>
+    <div id="loading">正在加载纹理…</div>
+    <div id="err" class="hidden"></div>
+  </main>
+</div>
+
+<!-- ==================================================================
+     着色器 A：球体（纹理 + 以太阳为点光源的简单 Phong 着色）
+     ================================================================== -->
+<script type="x-shader/x-vertex" id="vbody">
+#version 300 es
+in vec3 aPosition;
+in vec3 aNormal;
+in vec2 aTexCoord;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+
+out vec3 vNormalW;   // 世界空间法线
+out vec3 vPosW;      // 世界空间位置
+out vec2 vUV;
+
+void main() {
+  vec4 pw = uModel * vec4(aPosition, 1.0);
+  vPosW    = pw.xyz;
+  // 模型矩阵只含旋转 + 等比缩放，直接用其左上 3×3 变换法线再归一化即可
+  vNormalW = normalize(mat3(uModel) * aNormal);
+  vUV      = aTexCoord;
+  gl_Position = uProj * uView * pw;
+}
+</script>
+
+<script type="x-shader/x-fragment" id="fbody">
+#version 300 es
+precision highp float;
+
+in vec3 vNormalW;
+in vec3 vPosW;
+in vec2 vUV;
+
+uniform sampler2D uTex;
+uniform float uUseTex;      // 1 = 采样纹理，0 = 用 uColor 纯色
+uniform vec4  uColor;
+uniform vec3  uLightPos;    // 太阳位置（世界坐标，即原点）
+uniform vec3  uEyePos;      // 摄像机位置（世界坐标）
+uniform float uEmissive;    // 1 = 自发光（太阳），跳过光照
+uniform float uAmbient;     // 环境光
+uniform float uSpecular;    // 镜面强度
+uniform float uShininess;   // 高光指数
+uniform float uBright;      // 亮度增益
+
+out vec4 fragColor;
+
+void main() {
+  vec3 base = uUseTex > 0.5 ? texture(uTex, vUV).rgb : uColor.rgb;
+
+  if (uEmissive > 0.5) {                 // 太阳：不参与光照，直接发光
+    fragColor = vec4(base * uBright, 1.0);
+    return;
+  }
+
+  vec3 N = normalize(vNormalW);
+  vec3 L = normalize(uLightPos - vPosW); // 指向太阳
+  vec3 V = normalize(uEyePos   - vPosW);
+  vec3 H = normalize(L + V);
+
+  float diff = max(dot(N, L), 0.0);                       // 漫反射
+  float spec = pow(max(dot(N, H), 0.0), uShininess) * uSpecular
+             * step(0.001, diff);                        // 镜面（背光面无高光）
+
+  vec3 col = base * (uAmbient + diff) + vec3(spec);
+  fragColor = vec4(col, 1.0);
+}
+</script>
+
+<!-- ==================================================================
+     着色器 B：纯色图元（轨道线 / 自转轴 / 星空点）
+     ================================================================== -->
+<script type="x-shader/x-vertex" id="vflat">
+#version 300 es
+in vec3 aPosition;
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+uniform float uPointSize;
+void main() {
+  gl_Position  = uProj * uView * uModel * vec4(aPosition, 1.0);
+  gl_PointSize = uPointSize;
+}
+</script>
+
+<script type="x-shader/x-fragment" id="fflat">
+#version 300 es
+precision mediump float;
+uniform vec4  uColor;
+uniform float uRoundPoints;   // 1 = 把方形点裁成圆形
+out vec4 fragColor;
+void main() {
+  if (uRoundPoints > 0.5) {
+    vec2 d = gl_PointCoord - vec2(0.5);
+    if (dot(d, d) > 0.25) discard;
+  }
+  fragColor = uColor;
+}
+</script>
+
+<!-- ==================================================================
+     着色器 C：太阳光晕（面向摄像机的公告板，加法混合）
+     ================================================================== -->
+<script type="x-shader/x-vertex" id="vglow">
+#version 300 es
+in vec3 aPosition;          // 单位四边形 (-1,-1) … (1,1)
+uniform mat4 uModel;        // 已含"面向摄像机"的朝向与缩放
+uniform mat4 uView;
+uniform mat4 uProj;
+out vec2 vUV;
+void main() {
+  vUV = aPosition.xy * 0.5 + 0.5;
+  gl_Position = uProj * uView * uModel * vec4(aPosition, 1.0);
+}
+</script>
+
+<script type="x-shader/x-fragment" id="fglow">
+#version 300 es
+precision mediump float;
+in vec2 vUV;
+uniform vec3  uColor;
+uniform float uPower;       // 衰减指数，越大边缘越"硬"
+uniform float uStrength;
+out vec4 fragColor;
+void main() {
+  float r = length(vUV * 2.0 - 1.0);          // 0 = 圆心，1 = 四边形边界
+  float a = pow(max(0.0, 1.0 - r), uPower);
+  fragColor = vec4(uColor * a * uStrength, a);
+}
+</script>
+
+<!-- ============ 教材配套工具库（Angel & Shreiner 8E Common） ============ -->
+<script src="Common/MV.js"></script>
+<script src="Common/flatten.js"></script>
+<script src="Common/initShaders.js"></script>
+
+<!-- ============ 业务代码：配置 / 几何 / 纹理 / 矩阵 / 场景 / 相机 / 交互 / UI / 主程序 ============ -->
+<script src="js/config.js"></script>
+<script src="js/geometry.js"></script>
+<script src="js/textures.js"></script>
+<script src="js/transforms.js"></script>
+<script src="js/scene.js"></script>
+<script src="js/camera.js"></script>
+<script src="js/interaction.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
